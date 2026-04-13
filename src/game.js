@@ -352,10 +352,15 @@ class GhostNinjaScene extends Phaser.Scene {
     this.syncSwordToNinja();
     this.checkPumpkinSpawn();
     this.handlePumpkinProximity();
+    this.optimizeEnemyCount();
 
     this.enemies.children.iterate((enemy) => {
       if (!enemy || !enemy.active) return;
-      this.physics.moveToObject(enemy, this.ninja, enemy.moveSpeed);
+      
+      // Only update enemy movement every other frame to reduce lag
+      if (this.time.now % 2 === 0) {
+        this.physics.moveToObject(enemy, this.ninja, enemy.moveSpeed);
+      }
 
       // Keep enemy movement horizontal for clear beginner visuals.
       enemy.body.velocity.y = 0;
@@ -928,12 +933,42 @@ class GhostNinjaScene extends Phaser.Scene {
     }
   }
 
+  optimizeEnemyCount() {
+    const maxEnemies = 8;
+    const cullDistance = 800;
+    
+    // Remove enemies that are too far away from the ninja
+    this.enemies.children.iterate((enemy) => {
+      if (!enemy || !enemy.active) return;
+      
+      const distance = Math.abs(enemy.x - this.ninja.x);
+      if (distance > cullDistance) {
+        enemy.destroy();
+      }
+    });
+    
+    // If we still have too many enemies, remove the oldest ones
+    const activeEnemies = this.enemies.getChildren().filter(e => e && e.active);
+    if (activeEnemies.length > maxEnemies) {
+      const enemiesToRemove = activeEnemies.length - maxEnemies;
+      for (let i = 0; i < enemiesToRemove; i++) {
+        activeEnemies[i].destroy();
+      }
+    }
+  }
+
   handlePumpkinProximity() {
     if (this.phase !== "combat") return;
+    
+    // Only check proximity every few frames to reduce lag
+    if (this.time.now % 3 !== 0) return;
+    
     for (const pumpkin of this.pumpkins) {
       if (!pumpkin || !pumpkin.visible) continue;
+      
       // Only spawn enemies when ninja gets close to pumpkin
-      if (Math.abs(this.ninja.x - pumpkin.x) < 120) {
+      const distance = Math.abs(this.ninja.x - pumpkin.x);
+      if (distance < 120) {
         this.spawnEnemyFromPumpkinAt(pumpkin);
       }
     }
@@ -942,7 +977,9 @@ class GhostNinjaScene extends Phaser.Scene {
   spawnEnemyFromPumpkinAt(pumpkin) {
     if (!pumpkin) return;
     if (pumpkin.nextSpawnAt && this.time.now < pumpkin.nextSpawnAt) return;
-    pumpkin.nextSpawnAt = this.time.now + 3200;
+    
+    // Increase spawn cooldown to reduce frequent spawning
+    pumpkin.nextSpawnAt = this.time.now + 4000;
 
     if (pumpkin.anims) {
       pumpkin.play("pumpkin-burst", true);
