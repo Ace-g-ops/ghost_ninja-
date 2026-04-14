@@ -34,13 +34,14 @@ class GhostNinjaScene extends Phaser.Scene {
     this.load.image("bgSpace", "assets/background/space.png");
     this.preloadNinjaFrames();
 
-    this.load.image("ghost", "assets/halloween/ghost_small.png");
-    this.load.spritesheet("pumpkinSheet", "assets/halloween/sprite_sheets/png@1x/objects.png", {
-      frameWidth: 128,
-      frameHeight: 128,
+    // Load updated pumpkin knight sprite sheet
+    this.load.spritesheet("pumpkinKnight", "assets/enemies/pumpkinknight (2).png", {
+      frameWidth: 409,
+      frameHeight: 682,
     });
+
+    // Keep old assets for bridge phase
     this.load.image("pumpkin", "assets/halloween/decorations/png@1x/skull.png");
-    this.load.image("bat", "assets/halloween/bat.png");
     this.load.image("tree_big.png", "assets/halloween/tree_big.png");
     this.load.image("tree_medium.png", "assets/halloween/tree_medium.png");
     this.load.image("tree_small.png", "assets/halloween/tree_small.png");
@@ -59,6 +60,12 @@ class GhostNinjaScene extends Phaser.Scene {
     this.createMobileControls();
     this.createAudio();
     this.setupCamera();
+    
+    // Fix pumpkin knight sprite transparency
+    if (this.textures.exists('pumpkinKnight')) {
+      this.textures.get('pumpkinKnight').setFilter(Phaser.Textures.FilterMode.NEAREST);
+      this.textures.get('pumpkinKnight').source[0].setTransparentColor(0xffffff);
+    }
   }
 
   update() {
@@ -102,21 +109,32 @@ class GhostNinjaScene extends Phaser.Scene {
     makeAnim("ninja-attack", this.ninjaAttackFrames, 14, 0);
     makeAnim("ninja-dead", this.ninjaDeadFrames, 10, 0);
 
-    if (this.textures.exists("pumpkinSheet")) {
+    // Create pumpkin knight animations
+    if (this.textures.exists("pumpkinKnight")) {
+      // knight-run: frames 0-4 (row 1)
       this.anims.create({
-        key: "pumpkin-portal",
-        frames: this.anims.generateFrameNumbers("pumpkinSheet", { start: 0, end: 7 }),
+        key: "knight-run",
+        frames: this.anims.generateFrameNumbers("pumpkinKnight", { start: 0, end: 4 }),
         frameRate: 10,
         repeat: -1,
       });
+      
+      // knight-attack: frames 5-9 (row 2)
       this.anims.create({
-        key: "pumpkin-burst",
-        frames: this.anims.generateFrameNumbers("pumpkinSheet", { start: 8, end: 15 }),
-        frameRate: 14,
+        key: "knight-attack",
+        frames: this.anims.generateFrameNumbers("pumpkinKnight", { start: 5, end: 9 }),
+        frameRate: 12,
+        repeat: 0,
+      });
+      
+      // knight-death: frames 10-14 (row 3)
+      this.anims.create({
+        key: "knight-death",
+        frames: this.anims.generateFrameNumbers("pumpkinKnight", { start: 10, end: 14 }),
+        frameRate: 10,
         repeat: 0,
       });
     }
-
   }
 
   createBackground() {
@@ -136,7 +154,7 @@ class GhostNinjaScene extends Phaser.Scene {
     this.floor = this.add.rectangle(WORLD_WIDTH / 2, GROUND_Y + 10, WORLD_WIDTH, 20, 0xffffff, 0);
     this.physics.add.existing(this.floor, true);
 
-    // Pumpkins will be created later - give ninja running distance first
+    // No pumpkins - enemies will spawn directly
     this.pumpkins = [];
     this.pumpkinSpawnTriggered = false;
 
@@ -228,8 +246,7 @@ class GhostNinjaScene extends Phaser.Scene {
   }
 
   createCombatSpawners() {
-    // Pumpkins will be spawned dynamically based on player progress
-    // No automatic enemy spawning timer needed
+    // Enemies will spawn directly without pumpkins
   }
 
   // ----------------------
@@ -350,15 +367,17 @@ class GhostNinjaScene extends Phaser.Scene {
     this.updateManualJump();
     this.syncBodyToSpritePosition();
     this.syncSwordToNinja();
-    this.checkPumpkinSpawn();
-    this.handlePumpkinProximity();
+    this.checkEnemySpawn();
     this.optimizeEnemyCount();
 
     this.enemies.children.iterate((enemy) => {
       if (!enemy || !enemy.active) return;
       
+      // Update knight AI
+      this.updateKnightAI(enemy);
+      
       // Only update enemy movement every other frame to reduce lag
-      if (this.time.now % 2 === 0) {
+      if (this.time.now % 2 === 0 && !enemy.isAttacking) {
         this.physics.moveToObject(enemy, this.ninja, enemy.moveSpeed);
       }
 
@@ -392,7 +411,16 @@ class GhostNinjaScene extends Phaser.Scene {
         this.showDamageNumber(enemy.x, enemy.y - 14, 1);
 
         if (enemy.hp <= 0) {
-          enemy.destroy();
+          // Play death animation for knights
+          if (enemy.getData("type") === "pumpkinKnight") {
+            enemy.anims.play("knight-death");
+            enemy.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+              enemy.destroy();
+            });
+          } else {
+            enemy.destroy();
+          }
+          
           this.killCount += 1;
           this.coins += 10;
           this.playSfx("kill");
@@ -441,6 +469,9 @@ class GhostNinjaScene extends Phaser.Scene {
     this.jumpVelocity = 0;
     this.ninja.body.setVelocity(0, 0);
     // No enemy timer to remove anymore
+    if (this.enemySpawnTimer) {
+      this.enemySpawnTimer.remove(false);
+    }
 
     // Redraw a bridge lane.
     this.ground.fillColor = 0x1f1a2f;
@@ -912,24 +943,66 @@ class GhostNinjaScene extends Phaser.Scene {
     setPos(this.mobileButtons.attack, width - margin, height - margin);
   }
 
-  createPumpkinPortal(x, y, scale = 1) {
-    if (this.anims.exists("pumpkin-portal")) {
-      const sprite = this.add.sprite(x, y, "pumpkinSheet", 0).setScale(scale).setAlpha(0.98);
-      sprite.setTint(0xff9a2e);
-      sprite.play("pumpkin-portal");
-      return sprite;
+  checkEnemySpawn() {
+    // Spawn enemies directly when ninja reaches certain distance
+    if (!this.enemySpawnTriggered && this.ninja.x > 800) {
+      this.enemySpawnTriggered = true;
+      // Start spawning enemies directly
+      this.enemySpawnTimer = this.time.addEvent({
+        delay: 4000,
+        loop: true,
+        callback: () => {
+          if (this.phase !== "combat") return;
+          this.spawnEnemyDirectly();
+        },
+      });
     }
-    return this.add.image(x, y, "pumpkin").setScale(scale).setAlpha(0.98).setTint(0xff8d2b);
   }
 
-  checkPumpkinSpawn() {
-    // Spawn pumpkins when ninja reaches certain distance to give running room
-    if (!this.pumpkinSpawnTriggered && this.ninja.x > 600) {
-      this.pumpkinSpawnTriggered = true;
-      // Create pumpkins ahead of the player
-      for (let x = Math.max(800, this.ninja.x + 200); x <= WORLD_WIDTH - 220; x += 420) {
-        this.pumpkins.push(this.createPumpkinPortal(x, GROUND_Y - 20, 1.05));
-      }
+  spawnEnemyDirectly() {
+    // Spawn pumpkin knight farther ahead of ninja at random position
+    const spawnX = this.ninja.x + Phaser.Math.Between(400, 800);
+    const spawnY = COMBAT_FLOOR_Y - 44;
+    
+    const knight = this.enemies.create(spawnX, spawnY, "pumpkinKnight");
+    knight.setScale(0.4); // Scale down to match ninja size
+    knight.setAlpha(1);
+    knight.setBlendMode(Phaser.BlendModes.NORMAL);
+    knight.setData("type", "pumpkinKnight");
+    knight.moveSpeed = Phaser.Math.Between(70, 120);
+    knight.hp = 3; // Knights have more HP
+    knight.setDepth(2);
+    knight.body.allowGravity = false;
+    knight.body.setSize(knight.width * 0.3, knight.height * 0.3); // Adjust collision box for ninja-like size
+    knight.body.setImmovable(false);
+    knight.anims.play("knight-run");
+    knight.isAttacking = false;
+    knight.attackCooldown = 0;
+    
+    return knight;
+  }
+
+  updateKnightAI(knight) {
+    const distance = Math.abs(knight.x - this.ninja.x);
+    
+    // Update attack cooldown
+    if (knight.attackCooldown > 0) {
+      knight.attackCooldown -= this.game.loop.delta;
+    }
+    
+    // Check if knight should attack
+    if (distance < 80 && !knight.isAttacking && knight.attackCooldown <= 0) {
+      knight.isAttacking = true;
+      knight.attackCooldown = 2000; // 2 second cooldown
+      knight.anims.play("knight-attack");
+      
+      // Return to running after attack animation
+      knight.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+        knight.isAttacking = false;
+        if (knight.active) {
+          knight.anims.play("knight-run");
+        }
+      });
     }
   }
 
@@ -955,52 +1028,6 @@ class GhostNinjaScene extends Phaser.Scene {
         activeEnemies[i].destroy();
       }
     }
-  }
-
-  handlePumpkinProximity() {
-    if (this.phase !== "combat") return;
-    
-    // Only check proximity every few frames to reduce lag
-    if (this.time.now % 3 !== 0) return;
-    
-    for (const pumpkin of this.pumpkins) {
-      if (!pumpkin || !pumpkin.visible) continue;
-      
-      // Only spawn enemies when ninja gets close to pumpkin
-      const distance = Math.abs(this.ninja.x - pumpkin.x);
-      if (distance < 120) {
-        this.spawnEnemyFromPumpkinAt(pumpkin);
-      }
-    }
-  }
-
-  spawnEnemyFromPumpkinAt(pumpkin) {
-    if (!pumpkin) return;
-    if (pumpkin.nextSpawnAt && this.time.now < pumpkin.nextSpawnAt) return;
-    
-    // Increase spawn cooldown to reduce frequent spawning
-    pumpkin.nextSpawnAt = this.time.now + 4000;
-
-    if (pumpkin.anims) {
-      pumpkin.play("pumpkin-burst", true);
-      pumpkin.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => pumpkin.play("pumpkin-portal", true));
-    }
-
-    const isGhost = Phaser.Math.Between(0, 100) < 60;
-    const key = isGhost ? "ghost" : "bat";
-    
-    // Create enemy completely independent from pumpkin
-    const enemy = this.enemies.create(pumpkin.x, pumpkin.y - 30, key);
-    enemy.setScale(isGhost ? 0.9 : 0.8);
-    enemy.setData("type", isGhost ? "ghost" : "bat");
-    enemy.moveSpeed = Phaser.Math.Between(50, 110);
-    enemy.hp = isGhost ? 2 : 1;
-    enemy.setDepth(2);
-    enemy.body.allowGravity = false;
-    enemy.body.setSize(enemy.width * 0.65, enemy.height * 0.7);
-    
-    // Enemy is now completely separate from pumpkin
-    return enemy;
   }
 
   updateCoinUI() {
